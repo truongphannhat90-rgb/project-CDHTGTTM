@@ -2,8 +2,7 @@ import cv2
 import numpy as np
 
 def is_in_wrong_lane(cx, lane_lines):
-    """Logic sai làn (demo: bên trái đường phân làn = sai làn).
-       Bạn có thể chỉnh lại điều kiện này cho phù hợp góc camera."""
+    """Logic sai làn (demo: bên trái đường phân làn = sai làn)."""
     if not lane_lines:
         return False
 
