@@ -1,4 +1,4 @@
-# lane_hough.py - Dùng Hough cho nhiều video
+
 import cv2
 import numpy as np
 
