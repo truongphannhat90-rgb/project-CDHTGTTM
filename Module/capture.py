@@ -1,45 +1,25 @@
 import cv2
-from detect import VehicleDetector
 
-def main():
+class VideoCapture:
 
-    # Đường dẫn video
-    video_path = "traffic_video.mp4"
+    def __init__(self, source='data/traffic.mp4'):
 
-    # Đọc video
-    cap = cv2.VideoCapture(video_path)
+        print(f"Đang mở: {source}")
 
-    # Nếu muốn dùng webcam thì mở dòng dưới
-    # cap = cv2.VideoCapture(0)
+        self.cap = cv2.VideoCapture(source)
 
-    # Khởi tạo detector
-    detector = VehicleDetector()
+        if not self.cap.isOpened():
+            raise Exception("Không mở được video!")
 
-    while cap.isOpened():
+    def get_frame(self):
 
-        # Đọc từng frame
-        ret, frame = cap.read()
+        ret, frame = self.cap.read()
 
-        # Nếu hết video
         if not ret:
-            break
+            return None
 
-        # Resize frame
-        frame = cv2.resize(frame, (1280, 720))
+        return frame
 
-        # Xử lý detect + tracking + sai làn
-        output_frame = detector.process_frame(frame)
+    def release(self):
 
-        # Hiển thị kết quả
-        cv2.imshow("ITS - He Thong Nhan Dien Sai Lan", output_frame)
-
-        # Nhấn q để thoát
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-    # Giải phóng bộ nhớ
-    cap.release()
-    cv2.destroyAllWindows()
-
-if __name__ == "__main__":
-    main()
+        self.cap.release()

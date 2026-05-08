@@ -1,168 +1,44 @@
-import cv2
-import numpy as np
 from ultralytics import YOLO
-
-from lane import LaneDetectorHough
-from tracker import CentroidTracker
-from violation import check_and_draw_violations
 
 class VehicleDetector:
 
-    def __init__(self):
+    def __init__(self, model_path='yolov8n.pt'):
+        self.model = YOLO(model_path)
 
-        # Load model YOLOv8
-        self.model = YOLO("yolov8n.pt")
-
-        # Khởi tạo bộ phát hiện làn đường
-        self.lane_detector = LaneDetectorHough()
-
-        # Khởi tạo tracker
-        self.tracker = CentroidTracker(max_disappeared=30)
-
-        # Các class phương tiện trong COCO
-        self.vehicle_classes = [2, 3, 5, 7]
-
-        """
-        2 = car
-        3 = motorbike
-        5 = bus
-        7 = truck
-        """
-
-    def process_frame(self, frame):
-
-        # Danh sách detection
-        detections = []
-
-        # ==================================
-        # PHÁT HIỆN PHƯƠNG TIỆN
-        # ==================================
-        results = self.model.predict(
+    def detect(self, frame):
+        results = self.model(
             frame,
-            conf=0.5,
+            conf=0.5, 
+            iou=0.45,
+            classes=[2, 3, 5, 7],
             verbose=False
         )
 
+        detections = []
+        height, width = frame.shape[:2]
         for result in results:
-
-            boxes = result.boxes
-
-            for box in boxes:
-
-                # Lấy class
+            for box in result.boxes:
+                # Lấy tọa độ chuẩn xác
+                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                 cls = int(box.cls[0])
+                
+                # --- LOGIC LỌC THÔNG MINH (FIX TRIỆT ĐỂ NHẬN DIỆN SAI) ---
+                w_box = x2 - x1
+                h_box = y2 - y1
+                area_ratio = (w_box * h_box) / (width * height) # Tỉ lệ diện tích xe/khung hình
+                aspect_ratio = w_box / (h_box + 0.001)         # Tỉ lệ ngang/cao
 
-                # Độ tin cậy
-                conf = float(box.conf[0])
+                # 1. FIX Ô TÔ NHẦM THÀNH XE MÁY (Trường hợp ID 24 của bạn)
+                # Nếu AI bảo xe máy (3) nhưng diện tích > 3% khung hình HOẶC dáng xe quá rộng (ngang/cao > 0.8)
+                if cls == 3:
+                    if area_ratio > 0.03 or aspect_ratio > 0.8:
+                        cls = 2 # Ép về Car (Ô tô)
 
-                # Chỉ lấy phương tiện giao thông
-                if cls not in self.vehicle_classes:
-                    continue
+                # 2. FIX XE MÁY NHẦM THÀNH Ô TÔ (Xe máy ở xa)
+                # Nếu AI bảo ô tô (2) nhưng dáng xe cao gầy (ngang/cao < 0.6)
+                if cls == 2 and aspect_ratio < 0.6:
+                    cls = 3 # Ép về Motorcycle (Xe máy)
+                
+                detections.append([x1, y1, x2, y2, cls])
 
-                # Lấy tọa độ bounding box
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-
-                detections.append([
-                    x1,
-                    y1,
-                    x2,
-                    y2,
-                    conf,
-                    cls
-                ])
-
-        # ==================================
-        # TRACKING PHƯƠNG TIỆN
-        # ==================================
-        object_ids = self.tracker.update(detections)
-
-        tracked_objects = {}
-
-        for oid in object_ids:
-
-            if oid in self.tracker.boxes:
-                tracked_objects[oid] = self.tracker.boxes[oid]
-
-        # ==================================
-        # PHÁT HIỆN LÀN ĐƯỜNG
-        # ==================================
-        left_line, right_line = self.lane_detector.detect_lanes(frame)
-
-        lane_lines = []
-
-        # Vẽ làn trái
-        if left_line is not None:
-
-            lane_lines.append(left_line)
-
-            cv2.line(
-                frame,
-                (left_line[0], left_line[1]),
-                (left_line[2], left_line[3]),
-                (0, 255, 0),
-                5
-            )
-
-        # Vẽ làn phải
-        if right_line is not None:
-
-            lane_lines.append(right_line)
-
-            cv2.line(
-                frame,
-                (right_line[0], right_line[1]),
-                (right_line[2], right_line[3]),
-                (255, 0, 0),
-                5
-            )
-
-        # ==================================
-        # HIỂN THỊ TRACKING
-        # ==================================
-        for obj_id, box in tracked_objects.items():
-
-            x1, y1, x2, y2 = map(int, box)
-
-            # Vẽ bounding box
-            cv2.rectangle(
-                frame,
-                (x1, y1),
-                (x2, y2),
-                (0, 255, 255),
-                2
-            )
-
-            # Hiển thị ID
-            cv2.putText(
-                frame,
-                f"ID {obj_id}",
-                (x1, y1 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 255),
-                2
-            )
-
-        # ==================================
-        # KIỂM TRA SAI LÀN
-        # ==================================
-        violations, frame = check_and_draw_violations(
-            frame,
-            tracked_objects,
-            lane_lines
-        )
-
-        # ==================================
-        # HIỂN THỊ SỐ LƯỢNG VI PHẠM
-        # ==================================
-        cv2.putText(
-            frame,
-            f"So vi pham: {len(violations)}",
-            (30, 50),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 0, 255),
-            3
-        )
-
-        return frame
+        return detections
