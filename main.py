@@ -1,75 +1,86 @@
 import cv2
-import numpy as np
-from ultralytics import YOLO
-def main():
-    # Khởi tạo hệ thống 
-    model = YOLO('yolov8n.pt') 
-    video_path = "traffic_video.mp4" 
-    cap = cv2.VideoCapture(video_path)
-    car_lane_polygon = np.array([[100, 700], [500, 700], [450, 400], [200, 400]], np.int32)
-    bike_lane_polygon = np.array([[550, 700], [900, 700], [800, 400], [600, 400]], np.int32)
+import os
 
-   # Vòng lặp Frame 
-    while cap.isOpened():
-        success, frame = cap.read()
-        if not success:
+from module.capture import VideoCapture
+from module.detect import VehicleDetector
+from module.lane import detect_lanes
+from module.tracker import CentroidTracker
+from module.violation import (
+    check_and_draw_violations,
+    vehicle_counts
+)
+
+if __name__ == "__main__":
+    os.makedirs("results", exist_ok=True)
+
+    if os.path.exists("results/output.avi"):
+        os.remove("results/output.avi")
+
+    if os.path.exists("results/violations.txt"):
+        os.remove("results/violations.txt")
+
+    capture = VideoCapture("data/traffic.mp4")
+    detector = VehicleDetector()
+    tracker = CentroidTracker()
+
+    width = int(capture.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(capture.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = int(capture.cap.get(cv2.CAP_PROP_FPS)) or 30
+
+    out = cv2.VideoWriter(
+        "results/output.avi",
+        cv2.VideoWriter_fourcc(*'XVID'),
+        fps,
+        (width, height)
+    )
+
+    # ===== THAY ĐỔI QUAN TRỌNG: CỐ ĐỊNH LÀN ĐƯỜNG =====
+    fixed_lanes = None
+    frame_count = 0
+
+    while True:
+        frame = capture.get_frame()
+        if frame is None:
             break
 
-      # Tiền xử lý 
-        frame_resized = cv2.resize(frame, (640, 640))
+        frame_count += 1
 
-      # Phát hiện phương tiện
-        results = model.predict(frame_resized, conf=0.5)
-        
-        # Duy trì Tracking ID 
-        tracks = model.track(frame_resized, persist=True)
+        # Lấy lane chuẩn ở 10 frame đầu (lúc đường có thể vắng) 
+        # Sau đó dùng cố định để không bị nhảy lane theo thân xe
+        if frame_count <= 10:
+            lanes, frame_with_lanes = detect_lanes(frame)
+            if lanes:
+                fixed_lanes = lanes
 
-        for result in tracks[0].boxes:
-            # Lấy tọa độ 
-            x1, y1, x2, y2 = map(int, result.xyxy[0])
-            cls = int(result.cls[0])
-            conf = float(result.conf[0])
-            
-           
-            bottom_center = (int((x1 + x2) / 2), y2)
-            
-            # xác định vi phạm 
-            is_violation = False
-            label = "Hợp lệ"
-            color = (0, 255, 0) # Màu xanh cho xe đúng làn
+        # DETECT VÀ TRACK XE
+        detections = detector.detect(frame)
+        tracker.update(detections)
+        current_tracked = tracker.boxes
 
-            # Kiểm tra Point-in-Polygon
-            in_car_lane = cv2.pointPolygonTest(car_lane_polygon, bottom_center, False) >= 0
-            in_bike_lane = cv2.pointPolygonTest(bike_lane_polygon, bottom_center, False) >= 0
+        # KIỂM TRA VI PHẠM (Sử dụng fixed_lanes để triệt để lỗi nhảy lane)
+        violations, frame = check_and_draw_violations(
+            frame,
+            current_tracked,
+            detections,
+            fixed_lanes if fixed_lanes else []
+        )
 
-            
-            if cls == 2: 
-                if not in_car_lane:
-                    is_violation = True
-            elif cls == 3:
-                if not in_bike_lane:
-                    is_violation = True
+        # HIỂN THỊ THÔNG TIN
+      #  cv2.putText(frame, f"Violations: {len(violations)}", (30, 40),
+       #             cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
 
-            if is_violation:
-                label = "VI PHAM SAI LAN"
-                color = (0, 0, 255) # Màu đỏ cho vi phạm
-            
-            # 3. Hiển thị kết quả
-            cv2.rectangle(frame_resized, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(frame_resized, label, (x1, y1 - 10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        # GHI LOG
+        for v in violations:
+            with open("results/violations.txt", "a", encoding="utf-8") as f:
+                f.write(f"Xe ID {v['id']} ({v['type']}) vi pham tai frame {frame_count}\n")
 
-       
-        cv2.polylines(frame_resized, [car_lane_polygon], True, (255, 255, 0), 2)
-        cv2.polylines(frame_resized, [bike_lane_polygon], True, (0, 255, 255), 2)
+        out.write(frame)
+        cv2.imshow("Traffic Violation Detection", frame)
 
-        cv2.imshow("Wrong Lane Detection System", frame_resized)
-        
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-    cap.release()
+    capture.release()
+    out.release()
     cv2.destroyAllWindows()
-
-if __name__ == "__main__":
-    main()
+    print("✅ HOAN THANH!")
