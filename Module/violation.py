@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import datetime
 
 # Các biến toàn cục
 violated_ids = set()
@@ -20,135 +21,81 @@ def check_and_draw_violations(frame, tracked_objects, detections, lane_lines):
     violations = []
     height, width = frame.shape[:2]
 
-    # --- ĐỊNH NGHĨA 2 RANH GIỚI ĐỂ CHIA 3 LÀN ---
-    
-    # Ranh giới A: Giữa Làn 1 (Trái) và Làn 2 (Giữa)
+    # --- HÀM TÍNH TOÁN RANH GIỚI ĐỘNG 
     def get_sep_A(y):
-        x_top = width * 0.2    # Điểm xa bên trái
-        x_bottom = width * 0.01 # Điểm gần bên trái
-        y_top = height * 0.35   
-        y = min(y, height * 0.9)
+        x_top = width * 0.2; x_bottom = width * 0.001; y_top = height * 0.35   
+        y = min(max(y, y_top), height)
         return x_top + (x_bottom - x_top) * (y - y_top) / (height - y_top + 0.001)
 
-    # Ranh giới B: Giữa Làn 2 (Giữa) và Làn 3 (Sát vỉa hè)
     def get_sep_B(y):
-        x_top = width * 0.55    # Điểm xa sát bồn hoa
-        x_bottom = width * 0.58 # Điểm gần sát bồn hoa
-        y_top = height * 0.35   
-        y = min(y, height * 0.9)
+        x_top = width * 0.55; x_bottom = width * 0.58; y_top = height * 0.35   
+        y = min(max(y, y_top), height)
         return x_top + (x_bottom - x_top) * (y - y_top) / (height - y_top + 0.001)
 
+    # --- VẼ KHUNG XÁC ĐỊNH LÀN ĐƯỜNG (ZONES) ---
+    overlay = frame.copy()
+    y_start, y_end = int(height * 0.35), height
+    
+    # Tạo các điểm đa giác cho 3 làn
+    pts_lane1 = np.array([[0, y_start], [get_sep_A(y_start), y_start], [get_sep_A(y_end), y_end], [0, y_end]], np.int32)
+    pts_lane2 = np.array([[get_sep_A(y_start), y_start], [get_sep_B(y_start), y_start], [get_sep_B(y_end), y_end], [get_sep_A(y_end), y_end]], np.int32)
+    pts_lane3 = np.array([[get_sep_B(y_start), y_start], [width, y_start], [width, y_end], [get_sep_B(y_end), y_end]], np.int32)
+
+    # Vẽ màu mờ cho từng làn để dễ phân biệt
+    cv2.fillPoly(overlay, [pts_lane1], (255, 0, 0))   # Làn 1 (Xanh dương)
+    cv2.fillPoly(overlay, [pts_lane2], (0, 255, 0))   # Làn 2 (Xanh lá)
+    cv2.fillPoly(overlay, [pts_lane3], (0, 0, 255))   # Làn 3 (Đỏ)
+    frame = cv2.addWeighted(overlay, 0.15, frame, 0.85, 0)
+
+    # Vẽ 2 đường ranh giới 
+    cv2.line(frame, (int(get_sep_A(y_start)), y_start), (int(get_sep_A(y_end)), y_end), (255, 0, 255), 3) # Vạch Tím
+    cv2.line(frame, (int(get_sep_B(y_start)), y_start), (int(get_sep_B(y_end)), y_end), (0, 255, 255), 3)   # Vạch Vàng
+
+    # --- XỬ LÝ NHẬN DIỆN VÀ VI PHẠM ---
     for obj_id, data in tracked_objects.items():
-        is_this_vehicle_violating = False
-        
-        if len(data) >= 5:
-            x1, y1, x2, y2, cls = map(int, data)
-        else:
-            x1, y1, x2, y2 = map(int, data[:4])
-            cls = 3 
+        if len(data) >= 5: x1, y1, x2, y2, cls = map(int, data)
+        else: x1, y1, x2, y2 = map(int, data[:4]); cls = 3
             
-        cx = int((x1 + x2) / 2)
-        cy = int(y2) 
+        cx, cy = int((x1 + x2) / 2), int(y2) 
 
+        # Vùng miễn trừ & Khử nhiễu đứng yên
+        if cy > (height * 0.75) or cx > (width * 0.90): continue
 
-        # Vùng miễn trừ sát mép dưới (Fix lỗi xe máy thoát khung hình)
-        if cy > (height * 0.75):
-            is_this_vehicle_violating = False 
-        
-        # Loại bỏ xe bên kia bồn hoa
-        elif cx > (width * 0.90):
-            continue
-
-        # Kiểm tra xe đứng yên
-        if obj_id not in history_positions:
-            history_positions[obj_id] = []
+        if obj_id not in history_positions: history_positions[obj_id] = []
         history_positions[obj_id].append((cx, cy))
         
-        is_moving = True
         if len(history_positions[obj_id]) > FRAME_WINDOW:
             old_x, old_y = history_positions[obj_id][0]
-            distance = np.sqrt((cx - old_x)**2 + (cy - old_y)**2)
-            if distance < STATIONARY_THRESHOLD:
-                is_moving = False
+            if np.sqrt((cx - old_x)**2 + (cy - old_y)**2) < STATIONARY_THRESHOLD:
+                history_positions[obj_id].pop(0); continue
             history_positions[obj_id].pop(0)
 
-        if not is_moving:
-            continue 
-
+        # Kiểm tra loại xe và đếm
         vehicle_name = get_vehicle_name(cls)
-        sep_A = get_sep_A(cy)
-        sep_B = get_sep_B(cy)
-
-        # 1. ĐẾM XE
         if obj_id not in counted_ids:
             counted_ids.add(obj_id)
-            if vehicle_name in vehicle_counts:
-                vehicle_counts[vehicle_name] += 1
+            if vehicle_name in vehicle_counts: vehicle_counts[vehicle_name] += 1
 
-        # --- LOGIC PHÂN LÀN THEO CÁCH TÍNH CỦA BẠN (Làn 1 bên Phải) ---
-        # sep_A: Ranh giới bên TRÁI (Chia làn 2 và 3)
-        # sep_B: Ranh giới bên PHẢI (Chia làn 1 và 2)
-        
-        sep_trai = get_sep_A(cy) # Vạch sát dải phân cách
-        sep_phai = get_sep_B(cy) # Vạch sát vỉa hè
+        # Logic vi phạm
+        is_this_vehicle_violating = False
+        sep_A_val = get_sep_A(cy)
+        sep_B_val = get_sep_B(cy)
 
-                # sep_A là vạch TÍM (Trái), sep_B là vạch VÀNG (Phải)
-        current_sep_A = get_sep_A(cy)
-        current_sep_B = get_sep_B(cy)
+        if cls == 3: # XE MÁY: Sai khi vào Làn 3 (Bên phải vạch B)
+            if cx > (sep_B_val + OFFSET): is_this_vehicle_violating = True
+        elif cls in [2, 5, 7]: # Ô TÔ: Sai khi vào Làn 1 (Bên trái vạch A)
+            if cx < (sep_A_val - OFFSET): is_this_vehicle_violating = True
 
-        if cls == 3: # XE MÁY
-            # Xe máy ĐÚNG ở Làn 1 & 2 (Bên TRÁI vạch vàng)
-            # Xe máy SAI khi vào Làn 3 (Bên PHẢI vạch vàng sep_B)
-            if cx > (current_sep_B + OFFSET):
-                is_this_vehicle_violating = True
-                
-        elif cls in [2, 5, 7]: # Ô TÔ, XE BUÝT, XE TẢI
-            # Ô tô ĐÚNG ở Làn 2 & 3 (Bên PHẢI vạch tím)
-            # Ô tô SAI khi vào Làn 1 (Bên TRÁI vạch tím sep_A)
-            if cx < (current_sep_A - OFFSET):
-                is_this_vehicle_violating = True
-
-
-    #    # 2. LOGIC PHÂN LÀN HỖN HỢP
-    #    if not is_this_vehicle_violating:
-    #        if cls in [2, 5, 7]: # Ô TÔ
-    #            # Ô tô được đi làn 1, 2. Sai khi lấn hẳn vào sát lề (Làn 3)
-    #            if cx > (sep_B + OFFSET):
-    #                is_this_vehicle_violating = True
-    #        elif cls == 3: # XE MÁY
-    #            # Xe máy được đi làn 2, 3. Sai khi lấn hẳn sang dải phân cách trái (Làn 1)
-    #            if cx < (sep_A - 5):
-    #                is_this_vehicle_violating = True
-
-        # 3. HIỂN THỊ
-        color = (0, 255, 0)
+        # Hiển thị
+        color = (0, 0, 255) if is_this_vehicle_violating else (0, 255, 0)
         if is_this_vehicle_violating:
-            color = (0, 0, 255)
-            cv2.putText(frame, "SAI LAN", (x1, y1 - 10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            cv2.putText(frame, "SAI LAN", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
             if obj_id not in violated_ids:
-                violations.append({"id": obj_id, "type": vehicle_name})
+                violations.append({"id": obj_id, "type": vehicle_name, "time": str(datetime.datetime.now())})
                 violated_ids.add(obj_id)
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(frame, f"{vehicle_name} ID:{obj_id}", (x1, y1 - 35), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        cv2.putText(frame, f"{vehicle_name} ID:{obj_id}", (x1, y1 - 35), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
         cv2.circle(frame, (cx, cy), 5, (0, 255, 255), -1)
-
-    # ===== VẼ RANH GIỚI ẢO ĐỂ CĂN CHỈNH =====
-    # Vẽ Ranh giới A (Màu Tím - Giữa Làn 1 và 2)
-    # Lấy tọa độ X tại đỉnh (y_top) và đáy (height) để vẽ đường thẳng dài
-  #  xa_top = int(get_sep_A(height * 0.35))
-   # xa_bottom = int(get_sep_A(height))
-   # cv2.line(frame, (xa_top, int(height * 0.35)), (xa_bottom, height), (255, 0, 255), 3)
-   # cv2.putText(frame, "RANH GIOI A", (xa_top, int(height * 0.35) - 10), 
-   #             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
-
-    # Vẽ Ranh giới B (Màu Vàng - Giữa Làn 2 và 3)
- #   xb_top = int(get_sep_B(height * 0.35))
-  #  xb_bottom = int(get_sep_B(height))
-  #  cv2.line(frame, (xb_top, int(height * 0.35)), (xb_bottom, height), (0, 255, 255), 3)
-  #  cv2.putText(frame, "RANH GIOI B", (xb_top, int(height * 0.35) - 10), 
-   #             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
     return violations, frame
